@@ -80,6 +80,7 @@ impl OctreeBitset {
                 RawNode::Empty => {
                     if current_height == 0 {
                         *current_node = RawNode::Full;
+                        //TODO compress parent if siblings are also full
                         return true;
                     }
                     *current_node = RawNode::empty_branches();
@@ -106,6 +107,7 @@ impl OctreeBitset {
                 RawNode::Full => {
                     if current_height == 0 {
                         *current_node = RawNode::Empty;
+                        //TODO compress parent if siblings are also empty
                         return true;
                     }
                     *current_node = RawNode::full_branches()
