@@ -73,58 +73,73 @@ impl OctreeBitset {
     }
 
     pub fn insert(&mut self, idx: &Index) -> bool {
-        let mut current_node = &mut self.root;
-        let mut current_height = self.height;
-        loop {
-            match current_node {
+        fn insert_inner(idx: &Index, current_node: &mut RawNode, current_height: u32) -> bool {
+            let result = match current_node {
                 RawNode::Empty => {
                     if current_height == 0 {
                         *current_node = RawNode::Full;
-                        //TODO compress parent if siblings are also full
-                        return true;
+                        true
+                    } else {
+                        *current_node = RawNode::empty_branch();
+                        insert_inner(idx, current_node, current_height)
                     }
-                    *current_node = RawNode::empty_branches();
                 }
                 RawNode::Full => return false,
                 RawNode::Branch { children } => {
                     if current_height == 0 {
                         unreachable!("branch node at height zero");
                     }
-                    current_height -= 1;
-                    let bit_idx = idx.bit(current_height);
-                    current_node = &mut children[bit_idx.z][bit_idx.y][bit_idx.x];
+                    let bit_idx = idx.bit(current_height - 1);
+                    insert_inner(
+                        idx,
+                        &mut children[bit_idx.z][bit_idx.y][bit_idx.x],
+                        current_height - 1,
+                    )
                 }
+            };
+            if result {
+                current_node.shallow_compress();
             }
+            result
         }
+        insert_inner(idx, &mut self.root, self.height)
     }
 
     pub fn remove(&mut self, idx: &Index) -> bool {
-        let mut current_node = &mut self.root;
-        let mut current_height = self.height;
-        loop {
-            match current_node {
+        fn remove_inner(idx: &Index, current_node: &mut RawNode, current_height: u32) -> bool {
+            let result = match current_node {
                 RawNode::Empty => return false,
                 RawNode::Full => {
                     if current_height == 0 {
                         *current_node = RawNode::Empty;
-                        //TODO compress parent if siblings are also empty
-                        return true;
+                        true
+                    } else {
+                        *current_node = RawNode::full_branch();
+                        remove_inner(idx, current_node, current_height)
                     }
-                    *current_node = RawNode::full_branches()
                 }
                 RawNode::Branch { children } => {
                     if current_height == 0 {
                         unreachable!("branch node at height zero");
                     }
-                    current_height -= 1;
-                    let bit_idx = idx.bit(current_height);
-                    current_node = &mut children[bit_idx.z][bit_idx.y][bit_idx.x];
+                    let bit_idx = idx.bit(current_height - 1);
+                    remove_inner(
+                        idx,
+                        &mut children[bit_idx.z][bit_idx.y][bit_idx.x],
+                        current_height - 1,
+                    )
                 }
+            };
+            if result {
+                current_node.shallow_compress();
             }
+            result
         }
+        remove_inner(idx, &mut self.root, self.height)
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
 enum RawNode {
     Empty,
     Full,
@@ -135,21 +150,37 @@ enum RawNode {
 }
 
 impl RawNode {
-    fn empty_branches() -> Self {
+    const EMPTY_CHILDREN: [[[Self; 2]; 2]; 2] = [
+        [[Self::Empty, Self::Empty], [Self::Empty, Self::Empty]],
+        [[Self::Empty, Self::Empty], [Self::Empty, Self::Empty]],
+    ];
+    const FULL_CHILDREN: [[[Self; 2]; 2]; 2] = [
+        [[Self::Full, Self::Full], [Self::Full, Self::Full]],
+        [[Self::Full, Self::Full], [Self::Full, Self::Full]],
+    ];
+
+    fn empty_branch() -> Self {
         Self::Branch {
-            children: Box::new([
-                [[Self::Empty, Self::Empty], [Self::Empty, Self::Empty]],
-                [[Self::Empty, Self::Empty], [Self::Empty, Self::Empty]],
-            ]),
+            children: Box::new(Self::EMPTY_CHILDREN.clone()),
         }
     }
 
-    fn full_branches() -> Self {
+    fn full_branch() -> Self {
         Self::Branch {
-            children: Box::new([
-                [[Self::Full, Self::Full], [Self::Full, Self::Full]],
-                [[Self::Full, Self::Full], [Self::Full, Self::Full]],
-            ]),
+            children: Box::new(Self::FULL_CHILDREN.clone()),
+        }
+    }
+
+    fn shallow_compress(&mut self) {
+        match self {
+            Self::Branch { children } => {
+                if *children.as_ref() == Self::EMPTY_CHILDREN {
+                    *self = Self::Empty;
+                } else if *children.as_ref() == Self::FULL_CHILDREN {
+                    *self = Self::Full;
+                }
+            }
+            _ => {}
         }
     }
 }
