@@ -12,9 +12,17 @@ impl Index {
         Self { x, y, z }
     }
 
-    fn node_at(&self, height: u32) -> NodeIndex {
+    fn bit(&self, height: u32) -> (usize, usize, usize) {
+        (
+            (self.x as usize >> height) & 1,
+            (self.y as usize >> height) & 1,
+            (self.z as usize >> height) & 1,
+        )
+    }
+
+    fn branch_at(&self, height: u32) -> BranchIndex {
         let mask = !((1 << height) - 1);
-        NodeIndex {
+        BranchIndex {
             base: Index {
                 x: self.x & mask,
                 y: self.y & mask,
@@ -38,29 +46,16 @@ impl From<[u32; 3]> for Index {
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct NodeIndex {
+struct BranchIndex {
     base: Index,
     height: u32,
 }
 
-impl NodeIndex {
+impl BranchIndex {
     fn root(height: u32) -> Self {
         Self {
             base: Index { x: 0, y: 0, z: 0 },
             height,
-        }
-    }
-
-    fn child(&self, x: u32, y: u32, z: u32) -> NodeIndex {
-        debug_assert!(x < 2 && y < 2 && z < 2);
-        let child_height = self.height - 1;
-        NodeIndex {
-            base: Index {
-                x: self.base.x + (x << child_height),
-                y: self.base.y + (y << child_height),
-                z: self.base.z + (z << child_height),
-            },
-            height: child_height,
         }
     }
 }
@@ -73,7 +68,7 @@ enum RawNode {
 }
 
 pub struct OctreeBitset {
-    nodes: HashMap<NodeIndex, RawNode>,
+    branches: HashMap<BranchIndex, [[[RawNode; 2]; 2]; 2]>,
     height: u32,
 }
 
@@ -82,14 +77,19 @@ impl OctreeBitset {
         // ceil(log2(width))
         let height = u32::BITS - width.next_power_of_two().leading_zeros();
         let mut nodes = HashMap::new();
-        nodes.insert(NodeIndex::root(height), RawNode::Empty);
-        Self { nodes, height }
+        nodes.insert(BranchIndex::root(height), [[[RawNode::Empty; 2]; 2]; 2]);
+        Self {
+            branches: nodes,
+            height,
+        }
     }
 
     pub fn clear(&mut self) {
-        self.nodes.clear();
-        self.nodes
-            .insert(NodeIndex::root(self.height), RawNode::Empty);
+        self.branches.clear();
+        self.branches.insert(
+            BranchIndex::root(self.height),
+            [[[RawNode::Empty; 2]; 2]; 2],
+        );
     }
 
     pub fn width(&self) -> u32 {
@@ -97,18 +97,18 @@ impl OctreeBitset {
     }
 
     pub fn contains(&self, idx: &Index) -> bool {
-        let mut current_node = &self.nodes[&NodeIndex::root(self.height)];
         let mut current_height = self.height;
         loop {
-            match current_node {
+            let current_branch = &self.branches[&idx.branch_at(current_height)];
+            let (x, y, z) = idx.bit(current_height - 1);
+            match current_branch[z][y][x] {
                 RawNode::Empty => return false,
                 RawNode::Full => return true,
                 RawNode::Branch => {
+                    current_height -= 1;
                     if current_height == 0 {
                         unreachable!("branch node at height zero");
                     }
-                    current_height -= 1;
-                    current_node = &self.nodes[&idx.node_at(current_height)];
                 }
             }
         }
@@ -117,31 +117,29 @@ impl OctreeBitset {
     pub fn insert(&mut self, idx: &Index) -> bool {
         let mut current_height = self.height;
         loop {
-            let current_index = idx.node_at(current_height);
-            match self.nodes[&current_index] {
+            let current_index = idx.branch_at(current_height);
+            let current_branch = self.branches.get_mut(&current_index).unwrap();
+            let (x, y, z) = idx.bit(current_height - 1);
+            match current_branch[z][y][x] {
                 RawNode::Full => return false,
                 RawNode::Empty => {
-                    if current_height == 0 {
-                        self.nodes.insert(current_index, RawNode::Full);
+                    if current_height == 1 {
+                        current_branch[z][y][x] = RawNode::Full;
                         //TODO compress
                         return true;
                     } else {
-                        for x in 0..2 {
-                            for y in 0..2 {
-                                for z in 0..2 {
-                                    self.nodes
-                                        .insert(current_index.child(x, y, z), RawNode::Empty);
-                                }
-                            }
-                        }
-                        self.nodes.insert(current_index, RawNode::Branch);
+                        current_branch[z][y][x] = RawNode::Branch;
+                        self.branches.insert(
+                            idx.branch_at(current_height - 1),
+                            [[[RawNode::Empty; 2]; 2]; 2],
+                        );
                     }
                 }
                 RawNode::Branch => {
+                    current_height -= 1;
                     if current_height == 0 {
                         unreachable!("branch node at height zero");
                     }
-                    current_height -= 1;
                 }
             }
         }
@@ -150,31 +148,29 @@ impl OctreeBitset {
     pub fn remove(&mut self, idx: &Index) -> bool {
         let mut current_height = self.height;
         loop {
-            let current_index = idx.node_at(current_height);
-            match self.nodes[&current_index] {
+            let current_index = idx.branch_at(current_height);
+            let current_branch = self.branches.get_mut(&current_index).unwrap();
+            let (x, y, z) = idx.bit(current_height - 1);
+            match current_branch[z][y][x] {
                 RawNode::Empty => return false,
                 RawNode::Full => {
-                    if current_height == 0 {
-                        self.nodes.insert(current_index, RawNode::Empty);
+                    if current_height == 1 {
+                        current_branch[z][y][x] = RawNode::Empty;
                         //TODO compress
                         return true;
                     } else {
-                        for x in 0..2 {
-                            for y in 0..2 {
-                                for z in 0..2 {
-                                    self.nodes
-                                        .insert(current_index.child(x, y, z), RawNode::Full);
-                                }
-                            }
-                        }
-                        self.nodes.insert(current_index, RawNode::Branch);
+                        current_branch[z][y][x] = RawNode::Branch;
+                        self.branches.insert(
+                            idx.branch_at(current_height - 1),
+                            [[[RawNode::Full; 2]; 2]; 2],
+                        );
                     }
                 }
                 RawNode::Branch => {
+                    current_height -= 1;
                     if current_height == 0 {
                         unreachable!("branch node at height zero");
                     }
-                    current_height -= 1;
                 }
             }
         }
