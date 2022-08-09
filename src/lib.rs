@@ -1,186 +1,182 @@
+use std::collections::HashMap;
+
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Index {
-    pub x: usize,
-    pub y: usize,
-    pub z: usize,
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
 }
 
 impl Index {
-    pub fn new(x: usize, y: usize, z: usize) -> Self {
+    pub fn new(x: u32, y: u32, z: u32) -> Self {
         Self { x, y, z }
     }
 
-    fn bit(&self, idx: u32) -> Self {
-        Self {
-            x: (self.x >> idx) & 1,
-            y: (self.y >> idx) & 1,
-            z: (self.z >> idx) & 1,
+    fn node_at(&self, height: u32) -> NodeIndex {
+        let mask = !((1 << height) - 1);
+        NodeIndex {
+            base: Index {
+                x: self.x & mask,
+                y: self.y & mask,
+                z: self.z & mask,
+            },
+            height,
         }
     }
 }
 
-impl From<(usize, usize, usize)> for Index {
-    fn from((x, y, z): (usize, usize, usize)) -> Self {
+impl From<(u32, u32, u32)> for Index {
+    fn from((x, y, z): (u32, u32, u32)) -> Self {
         Self { x, y, z }
     }
 }
 
-impl From<[usize; 3]> for Index {
-    fn from([x, y, z]: [usize; 3]) -> Self {
+impl From<[u32; 3]> for Index {
+    fn from([x, y, z]: [u32; 3]) -> Self {
         Self { x, y, z }
     }
+}
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct NodeIndex {
+    base: Index,
+    height: u32,
+}
+
+impl NodeIndex {
+    fn root(height: u32) -> Self {
+        Self {
+            base: Index { x: 0, y: 0, z: 0 },
+            height,
+        }
+    }
+
+    fn child(&self, x: u32, y: u32, z: u32) -> NodeIndex {
+        debug_assert!(x < 2 && y < 2 && z < 2);
+        let child_height = self.height - 1;
+        NodeIndex {
+            base: Index {
+                x: self.base.x + (x << child_height),
+                y: self.base.y + (y << child_height),
+                z: self.base.z + (z << child_height),
+            },
+            height: child_height,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum RawNode {
+    Empty,
+    Full,
+    Branch,
 }
 
 pub struct OctreeBitset {
-    root: RawNode,
+    nodes: HashMap<NodeIndex, RawNode>,
     height: u32,
 }
 
 impl OctreeBitset {
-    pub const fn new(width: usize) -> Self {
-        Self {
-            root: RawNode::Empty,
-            // ceil(log2(width))
-            height: usize::BITS - width.next_power_of_two().leading_zeros(),
-        }
+    pub fn new(width: u32) -> Self {
+        // ceil(log2(width))
+        let height = u32::BITS - width.next_power_of_two().leading_zeros();
+        let mut nodes = HashMap::new();
+        nodes.insert(NodeIndex::root(height), RawNode::Empty);
+        Self { nodes, height }
     }
 
     pub fn clear(&mut self) {
-        self.root = RawNode::Empty;
+        self.nodes.clear();
+        self.nodes
+            .insert(NodeIndex::root(self.height), RawNode::Empty);
     }
 
-    pub fn width(&self) -> usize {
+    pub fn width(&self) -> u32 {
         1 << self.height
     }
 
     pub fn contains(&self, idx: &Index) -> bool {
-        let mut current_node = &self.root;
+        let mut current_node = &self.nodes[&NodeIndex::root(self.height)];
         let mut current_height = self.height;
         loop {
             match current_node {
                 RawNode::Empty => return false,
                 RawNode::Full => return true,
-                RawNode::Branch { children } => {
+                RawNode::Branch => {
                     if current_height == 0 {
                         unreachable!("branch node at height zero");
                     }
                     current_height -= 1;
-                    let bit_idx = idx.bit(current_height);
-                    current_node = &children[bit_idx.z][bit_idx.y][bit_idx.x];
+                    current_node = &self.nodes[&idx.node_at(current_height)];
                 }
             }
         }
     }
 
     pub fn insert(&mut self, idx: &Index) -> bool {
-        fn insert_inner(idx: &Index, current_node: &mut RawNode, current_height: u32) -> bool {
-            let result = match current_node {
+        let mut current_height = self.height;
+        loop {
+            let current_index = idx.node_at(current_height);
+            match self.nodes[&current_index] {
+                RawNode::Full => return false,
                 RawNode::Empty => {
                     if current_height == 0 {
-                        *current_node = RawNode::Full;
-                        true
+                        self.nodes.insert(current_index, RawNode::Full);
+                        //TODO compress
+                        return true;
                     } else {
-                        *current_node = RawNode::empty_branch();
-                        insert_inner(idx, current_node, current_height)
+                        for x in 0..2 {
+                            for y in 0..2 {
+                                for z in 0..2 {
+                                    self.nodes
+                                        .insert(current_index.child(x, y, z), RawNode::Empty);
+                                }
+                            }
+                        }
+                        self.nodes.insert(current_index, RawNode::Branch);
                     }
                 }
-                RawNode::Full => return false,
-                RawNode::Branch { children } => {
+                RawNode::Branch => {
                     if current_height == 0 {
                         unreachable!("branch node at height zero");
                     }
-                    let bit_idx = idx.bit(current_height - 1);
-                    insert_inner(
-                        idx,
-                        &mut children[bit_idx.z][bit_idx.y][bit_idx.x],
-                        current_height - 1,
-                    )
+                    current_height -= 1;
                 }
-            };
-            if result {
-                current_node.shallow_compress();
             }
-            result
         }
-        insert_inner(idx, &mut self.root, self.height)
     }
 
     pub fn remove(&mut self, idx: &Index) -> bool {
-        fn remove_inner(idx: &Index, current_node: &mut RawNode, current_height: u32) -> bool {
-            let result = match current_node {
+        let mut current_height = self.height;
+        loop {
+            let current_index = idx.node_at(current_height);
+            match self.nodes[&current_index] {
                 RawNode::Empty => return false,
                 RawNode::Full => {
                     if current_height == 0 {
-                        *current_node = RawNode::Empty;
-                        true
+                        self.nodes.insert(current_index, RawNode::Empty);
+                        //TODO compress
+                        return true;
                     } else {
-                        *current_node = RawNode::full_branch();
-                        remove_inner(idx, current_node, current_height)
+                        for x in 0..2 {
+                            for y in 0..2 {
+                                for z in 0..2 {
+                                    self.nodes
+                                        .insert(current_index.child(x, y, z), RawNode::Full);
+                                }
+                            }
+                        }
+                        self.nodes.insert(current_index, RawNode::Branch);
                     }
                 }
-                RawNode::Branch { children } => {
+                RawNode::Branch => {
                     if current_height == 0 {
                         unreachable!("branch node at height zero");
                     }
-                    let bit_idx = idx.bit(current_height - 1);
-                    remove_inner(
-                        idx,
-                        &mut children[bit_idx.z][bit_idx.y][bit_idx.x],
-                        current_height - 1,
-                    )
-                }
-            };
-            if result {
-                current_node.shallow_compress();
-            }
-            result
-        }
-        remove_inner(idx, &mut self.root, self.height)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum RawNode {
-    Empty,
-    Full,
-    Branch {
-        /// Z-Y-X indexes. 0 is first half of axis partition; 1 is second half.
-        children: Box<[[[RawNode; 2]; 2]; 2]>,
-    },
-}
-
-impl RawNode {
-    const EMPTY_CHILDREN: [[[Self; 2]; 2]; 2] = [
-        [[Self::Empty, Self::Empty], [Self::Empty, Self::Empty]],
-        [[Self::Empty, Self::Empty], [Self::Empty, Self::Empty]],
-    ];
-    const FULL_CHILDREN: [[[Self; 2]; 2]; 2] = [
-        [[Self::Full, Self::Full], [Self::Full, Self::Full]],
-        [[Self::Full, Self::Full], [Self::Full, Self::Full]],
-    ];
-
-    fn empty_branch() -> Self {
-        Self::Branch {
-            children: Box::new(Self::EMPTY_CHILDREN.clone()),
-        }
-    }
-
-    fn full_branch() -> Self {
-        Self::Branch {
-            children: Box::new(Self::FULL_CHILDREN.clone()),
-        }
-    }
-
-    fn shallow_compress(&mut self) {
-        match self {
-            Self::Branch { children } => {
-                if *children.as_ref() == Self::EMPTY_CHILDREN {
-                    *self = Self::Empty;
-                } else if *children.as_ref() == Self::FULL_CHILDREN {
-                    *self = Self::Full;
+                    current_height -= 1;
                 }
             }
-            _ => {}
         }
     }
 }
