@@ -125,7 +125,7 @@ impl OctreeBitset {
                 RawNode::Empty => {
                     if current_height == 1 {
                         current_branch[z][y][x] = RawNode::Full;
-                        //TODO compress
+                        self.compress(idx, RawNode::Full);
                         return true;
                     } else {
                         current_branch[z][y][x] = RawNode::Branch;
@@ -156,7 +156,7 @@ impl OctreeBitset {
                 RawNode::Full => {
                     if current_height == 1 {
                         current_branch[z][y][x] = RawNode::Empty;
-                        //TODO compress
+                        self.compress(idx, RawNode::Empty);
                         return true;
                     } else {
                         current_branch[z][y][x] = RawNode::Branch;
@@ -173,6 +173,21 @@ impl OctreeBitset {
                     }
                 }
             }
+        }
+    }
+
+    fn compress(&mut self, idx: &Index, state: RawNode) {
+        for current_height in 1..self.height {
+            let current_index = idx.branch_at(current_height);
+            let current_branch = self.branches.get_mut(&current_index).unwrap();
+            if *current_branch != [[[state; 2]; 2]; 2] {
+                return;
+            }
+            self.branches.remove(&current_index);
+            let (x, y, z) = idx.bit(current_height);
+            self.branches
+                .get_mut(&idx.branch_at(current_height + 1))
+                .unwrap()[z][y][x] = state;
         }
     }
 }
