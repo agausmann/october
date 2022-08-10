@@ -62,48 +62,85 @@ impl BranchIndex {
 
 #[derive(Clone, Copy, PartialEq)]
 enum RawNode {
-    Empty,
-    Full,
+    False,
+    True,
     Branch,
 }
 
-pub struct OctreeBitset {
-    branches: HashMap<BranchIndex, [[[RawNode; 2]; 2]; 2]>,
+impl From<bool> for RawNode {
+    fn from(x: bool) -> Self {
+        match x {
+            false => Self::False,
+            true => Self::True,
+        }
+    }
+}
+
+struct Branch {
+    children: [[[RawNode; 2]; 2]; 2],
+}
+
+/// A three-dimensional bitmap, implemented as an octree.
+pub struct OctreeBitmap {
+    branches: HashMap<BranchIndex, Branch>,
     height: u32,
 }
 
-impl OctreeBitset {
+impl OctreeBitmap {
+    /// Creates a new, empty bitmap.
+    ///
+    /// The indexes allowed in the set are limited to a certain range, specified
+    /// by the `width` parameter; the values of indexes on each dimension must
+    /// be within the range `0..width`.
     pub fn new(width: u32) -> Self {
         // ceil(log2(width))
         let height = u32::BITS - width.next_power_of_two().leading_zeros();
         let mut nodes = HashMap::new();
-        nodes.insert(BranchIndex::root(height), [[[RawNode::Empty; 2]; 2]; 2]);
+        nodes.insert(
+            BranchIndex::root(height),
+            Branch {
+                children: [[[RawNode::False; 2]; 2]; 2],
+            },
+        );
         Self {
             branches: nodes,
             height,
         }
     }
 
+    /// Clears the map.
+    ///
+    /// After this is called, [`get`] will return `false` for all indexes.
     pub fn clear(&mut self) {
         self.branches.clear();
         self.branches.insert(
             BranchIndex::root(self.height),
-            [[[RawNode::Empty; 2]; 2]; 2],
+            Branch {
+                children: [[[RawNode::False; 2]; 2]; 2],
+            },
         );
     }
 
+    /// The width of the map. Index values in each dimension must be within the
+    /// range `0..map.width()`.
+    ///
+    /// If the map is constructed with [`new`], this is guaranteed to be greater
+    /// than or equal to the specified value of `width`. In the current
+    /// implementation, it is rounded up to the next power of two less than
+    /// or equal the specified width.
     pub fn width(&self) -> u32 {
         1 << self.height
     }
 
-    pub fn contains(&self, idx: &Index) -> bool {
+    /// Get the current value of the bit at the given index.
+    pub fn get(&self, idx: &Index) -> bool {
         let mut current_height = self.height;
         loop {
             let current_branch = &self.branches[&idx.branch_at(current_height)];
             let (x, y, z) = idx.bit(current_height - 1);
-            match current_branch[z][y][x] {
-                RawNode::Empty => return false,
-                RawNode::Full => return true,
+            match current_branch.children[z][y][x] {
+                RawNode::False => return false,
+                RawNode::True => return true,
                 RawNode::Branch => {
                     current_height -= 1;
                     if current_height == 0 {
@@ -114,80 +151,61 @@ impl OctreeBitset {
         }
     }
 
-    pub fn insert(&mut self, idx: &Index) -> bool {
+    /// Set the value at the given index.
+    pub fn set(&mut self, idx: &Index, value: bool) {
+        let desired_state = RawNode::from(value);
         let mut current_height = self.height;
         loop {
             let current_index = idx.branch_at(current_height);
             let current_branch = self.branches.get_mut(&current_index).unwrap();
             let (x, y, z) = idx.bit(current_height - 1);
-            match current_branch[z][y][x] {
-                RawNode::Full => return false,
-                RawNode::Empty => {
-                    if current_height == 1 {
-                        current_branch[z][y][x] = RawNode::Full;
-                        self.compress(idx, RawNode::Full);
-                        return true;
-                    } else {
-                        current_branch[z][y][x] = RawNode::Branch;
-                        self.branches.insert(
-                            idx.branch_at(current_height - 1),
-                            [[[RawNode::Empty; 2]; 2]; 2],
-                        );
-                    }
-                }
+            match current_branch.children[z][y][x] {
                 RawNode::Branch => {
                     current_height -= 1;
                     if current_height == 0 {
                         unreachable!("branch node at height zero");
                     }
                 }
-            }
-        }
-    }
-
-    pub fn remove(&mut self, idx: &Index) -> bool {
-        let mut current_height = self.height;
-        loop {
-            let current_index = idx.branch_at(current_height);
-            let current_branch = self.branches.get_mut(&current_index).unwrap();
-            let (x, y, z) = idx.bit(current_height - 1);
-            match current_branch[z][y][x] {
-                RawNode::Empty => return false,
-                RawNode::Full => {
-                    if current_height == 1 {
-                        current_branch[z][y][x] = RawNode::Empty;
-                        self.compress(idx, RawNode::Empty);
-                        return true;
+                other => {
+                    if desired_state == other {
+                        // Already
+                        return;
+                    } else if current_height == 1 {
+                        current_branch.children[z][y][x] = desired_state;
+                        self.compress(idx, desired_state);
+                        return;
                     } else {
-                        current_branch[z][y][x] = RawNode::Branch;
+                        current_branch.children[z][y][x] = RawNode::Branch;
                         self.branches.insert(
                             idx.branch_at(current_height - 1),
-                            [[[RawNode::Full; 2]; 2]; 2],
+                            Branch {
+                                children: [[[other; 2]; 2]; 2],
+                            },
                         );
                     }
                 }
-                RawNode::Branch => {
-                    current_height -= 1;
-                    if current_height == 0 {
-                        unreachable!("branch node at height zero");
-                    }
-                }
             }
         }
     }
 
+    /// Traverse the tree from the specified leaf to the root, replacing all
+    /// branches that have uniform child values with a single node of that
+    /// value.
     fn compress(&mut self, idx: &Index, state: RawNode) {
+        // Root node (==self.height) is intentionally excluded as it is always
+        // a branch node.
         for current_height in 1..self.height {
             let current_index = idx.branch_at(current_height);
             let current_branch = self.branches.get_mut(&current_index).unwrap();
-            if *current_branch != [[[state; 2]; 2]; 2] {
+            if current_branch.children != [[[state; 2]; 2]; 2] {
                 return;
             }
             self.branches.remove(&current_index);
             let (x, y, z) = idx.bit(current_height);
             self.branches
                 .get_mut(&idx.branch_at(current_height + 1))
-                .unwrap()[z][y][x] = state;
+                .unwrap()
+                .children[z][y][x] = state;
         }
     }
 }
@@ -198,26 +216,26 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let mut octree = OctreeBitset::new(5);
+        let mut octree = OctreeBitmap::new(5);
         assert!(octree.width() >= 5);
 
         let a = Index::new(1, 2, 3);
         let b = Index::new(0, 3, 4);
 
-        octree.insert(&a);
-        assert!(octree.contains(&a));
-        assert!(!octree.contains(&b));
+        octree.set(&a, true);
+        assert!(octree.get(&a));
+        assert!(!octree.get(&b));
 
-        octree.insert(&b);
-        assert!(octree.contains(&a));
-        assert!(octree.contains(&b));
+        octree.set(&b, true);
+        assert!(octree.get(&a));
+        assert!(octree.get(&b));
 
-        octree.remove(&a);
-        assert!(!octree.contains(&a));
-        assert!(octree.contains(&b));
+        octree.set(&a, false);
+        assert!(!octree.get(&a));
+        assert!(octree.get(&b));
 
-        octree.remove(&b);
-        assert!(!octree.contains(&a));
-        assert!(!octree.contains(&a));
+        octree.set(&b, false);
+        assert!(!octree.get(&a));
+        assert!(!octree.get(&a));
     }
 }
